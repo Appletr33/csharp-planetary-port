@@ -10,7 +10,7 @@ The core goal of this repository is to establish a dynamic, clipmap-based terrai
 - **`Silk.NET.Shaderc`** for evaluating text `.hlsl` arrays locally into GPU Spir-V structures natively.
 
 > **Original Rust Repository:** If you need to evaluate the baseline architectural functionality, stream chunking logic, or compute algorithms, refer to the original implementation here:
-> `https://github.com/Appletr33/planetary_terrain_renderer`
+> `https://github.com/kurtkuehnert/planetary_terrain_renderer.git`
 
 ---
 
