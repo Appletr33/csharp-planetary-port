@@ -1,0 +1,6 @@
+/bin/
+/obj/
+/.vscode/
+/Tests/bin/
+/Tests/obj/
+/PlanetaryTerrainRenderer.Tests/
