@@ -1,0 +1,55 @@
+/* Translated from WGSL */
+#import bevy_terrain::types::{TileCoordinate, Blend}
+#import bevy_terrain::bindings::{terrain_view, approximate_height, temporary_tiles, state, indirect_buffer}
+#import bevy_terrain::functions::{compute_view_coordinate, compute_world_coordinate, lookup_tile, apply_height, compute_blend}
+#import bevy_terrain::attachments::{sample_height, sample_height_mask}
+
+@compute @workgroup_size(1, 1, 1)
+void prepare_root() {
+    state.counter = -1;
+    atomicStore(&state.child_index, int(terrain_view.geometry_tile_count - 1u));
+    atomicStore(&state.final_index, 0);
+    indirect_buffer.workgroup_count = vec3<uint>(1u, 1u, 1u);
+
+#ifdef SPHERICAL
+    // Todo: consider culling the entire back face (opposite of viewer)
+    for (var i: uint = 0u; i < 6u; i = i + 1u) { temporary_tiles[i] = TileCoordinate(i, 0u, vec2<uint>(0u)); }
+    state.tile_count = 6u;
+#else
+    temporary_tiles[0] = TileCoordinate(0u, 0u, vec2<uint>(0u));
+    state.tile_count = 1u;
+#endif
+
+    // compute approximate height
+    let coordinate       = compute_view_coordinate(terrain_view.face, terrain_view.lod);
+    const auto world_coordinate = compute_world_coordinate(coordinate);
+    let blend            = compute_blend(world_coordinate.view_distance);
+
+    const auto tile = lookup_tile(coordinate, blend);
+    if (!sample_height_mask(tile)) { approximate_height = sample_height(tile); }
+
+    // Todo: this does not work
+    // const auto distance = dot(normalize(apply_height(world_coordinate, approximate_height) - terrain_view.world_position), world_coordinate.normal);
+    // if (distance > 0.0) { state.tile_count   = 0u; }
+}
+
+@compute @workgroup_size(1, 1, 1)
+void prepare_next() {
+    if (state.counter == 1) {
+        state.tile_count = uint(atomicExchange(&state.child_index, int(terrain_view.geometry_tile_count - 1u)));
+    }
+    else {
+        state.tile_count = terrain_view.geometry_tile_count - 1u - uint(atomicExchange(&state.child_index, 0));
+    }
+
+    state.counter = -state.counter;
+    indirect_buffer.workgroup_count.x = (state.tile_count + 63u) / 64u;
+}
+
+@compute @workgroup_size(1, 1, 1)
+void prepare_render() {
+    const auto tile_count = uint(atomicLoad(&state.final_index));
+    const auto vertex_count = terrain_view.vertices_per_tile * tile_count;
+
+    indirect_buffer.workgroup_count = vec3<uint>(vertex_count, 1u, 0u);
+}

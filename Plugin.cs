@@ -2,14 +2,17 @@ using System;
 
 namespace PlanetaryTerrainRenderer
 {
-    // Using Stride Game system structures
     public class TerrainPlugin
     {
-        public void Initialize()
+        public void Build()
         {
-            // Placeholder logic to mirror Bevy Plugin initialization
-            // In Stride, scripts and graphics compositors are configured visually in the editor
-            // or programmatically via Game.cs modifications.
+            // Set up component storage, update loops and basic engine configurations
+            // Replacing Bevy's app.add_plugins with C# init logic
+        }
+
+        public void Finish()
+        {
+            // Equivalent of bevy's finish step: setup shaders, pipelines
         }
     }
 }
