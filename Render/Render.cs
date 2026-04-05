@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
-using Stride.Core.Mathematics;
-using Stride.Graphics;
+using Silk.NET.OpenGL;
 
 namespace PlanetaryTerrainRenderer.Render
 {
@@ -24,44 +23,26 @@ namespace PlanetaryTerrainRenderer.Render
 
     public class TilingPrepassItem
     {
-        public int RefineTilesPipelineId;
-        public int PrepareRootPipelineId;
-        public int PrepareNextPipelineId;
-        public int PrepareRenderPipelineId;
-    }
-
-    public class TerrainTilingPrepassPipelines
-    {
-        // Layouts and shaders
+        public uint RefineTilesPipelineId;
+        public uint PrepareRootPipelineId;
+        public uint PrepareNextPipelineId;
+        public uint PrepareRenderPipelineId;
     }
 
     public class GpuTerrain
     {
-        // Terrain Bind group
-    }
-
-    public class TerrainMaterialPlugin
-    {
+        // Buffers and parameters
     }
 
     public class GpuTerrainView
     {
         public uint RefinementCount;
-        public Stride.Graphics.Buffer IndirectBuffer; // Maps to ID3D11Buffer for DrawInstancedIndirect
-        // Bind groups
-    }
-
-    public class TerrainViewBindGroup
-    {
-    }
-
-    public class TerrainPass
-    {
+        public uint IndirectBuffer; // GL buffer object for DrawInstancedIndirect
     }
 
     public class TilingPrepass
     {
-        public void Run(CommandList commandList, Dictionary<Tuple<int, int>, TilingPrepassItem> prepassItems, Dictionary<int, GpuTerrain> gpuTerrains, Dictionary<Tuple<int, int>, GpuTerrainView> gpuTerrainViews, bool freeze)
+        public void Run(GL gl, Dictionary<Tuple<int, int>, TilingPrepassItem> prepassItems, Dictionary<int, GpuTerrain> gpuTerrains, Dictionary<Tuple<int, int>, GpuTerrainView> gpuTerrainViews, bool freeze)
         {
             if (freeze) return;
 
@@ -74,17 +55,26 @@ namespace PlanetaryTerrainRenderer.Render
                 var gpuTerrain = gpuTerrains[terrainId];
                 var gpuTerrainView = gpuTerrainViews[kvp.Key];
 
-                // Equivalent of dispatch_workgroups(1,1,1) for root
-                // commandList.Dispatch(1, 1, 1);
+                gl.UseProgram(item.PrepareRootPipelineId);
+                gl.DispatchCompute(1, 1, 1);
+                gl.MemoryBarrier(MemoryBarrierMask.ShaderStorageBarrierBit);
 
                 for (uint i = 0; i < gpuTerrainView.RefinementCount; i++)
                 {
-                    // commandList.DispatchIndirect(...)
-                    // commandList.Dispatch(1, 1, 1);
+                    gl.UseProgram(item.RefineTilesPipelineId);
+                    gl.BindBuffer(BufferTargetARB.DispatchIndirectBuffer, gpuTerrainView.IndirectBuffer);
+                    gl.DispatchComputeIndirect(0); // Offset 0
+                    gl.MemoryBarrier(MemoryBarrierMask.ShaderStorageBarrierBit);
+
+                    gl.UseProgram(item.PrepareNextPipelineId);
+                    gl.DispatchCompute(1, 1, 1);
+                    gl.MemoryBarrier(MemoryBarrierMask.ShaderStorageBarrierBit);
                 }
 
-                // commandList.DispatchIndirect(...)
-                // commandList.Dispatch(1, 1, 1);
+                gl.UseProgram(item.PrepareRenderPipelineId);
+                gl.BindBuffer(BufferTargetARB.DispatchIndirectBuffer, gpuTerrainView.IndirectBuffer);
+                gl.DispatchComputeIndirect(0);
+                gl.MemoryBarrier(MemoryBarrierMask.ShaderStorageBarrierBit);
             }
         }
     }
