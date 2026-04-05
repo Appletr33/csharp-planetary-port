@@ -1,6 +1,6 @@
 using System;
 using System.Collections.Generic;
-using Silk.NET.OpenGL;
+using Silk.NET.Vulkan;
 
 namespace PlanetaryTerrainRenderer.Render
 {
@@ -23,26 +23,27 @@ namespace PlanetaryTerrainRenderer.Render
 
     public class TilingPrepassItem
     {
-        public uint RefineTilesPipelineId;
-        public uint PrepareRootPipelineId;
-        public uint PrepareNextPipelineId;
-        public uint PrepareRenderPipelineId;
+        public Pipeline RefineTilesPipeline;
+        public Pipeline PrepareRootPipeline;
+        public Pipeline PrepareNextPipeline;
+        public Pipeline PrepareRenderPipeline;
     }
 
     public class GpuTerrain
     {
-        // Buffers and parameters
+        public GpuBuffer<float> TerrainConfigBuffer;
     }
 
     public class GpuTerrainView
     {
         public uint RefinementCount;
-        public uint IndirectBuffer; // GL buffer object for DrawInstancedIndirect
+        public Silk.NET.Vulkan.Buffer IndirectBuffer; 
+        public GpuBuffer<uint> PrepassViewBuffer;
     }
 
     public class TilingPrepass
     {
-        public void Run(GL gl, Dictionary<Tuple<int, int>, TilingPrepassItem> prepassItems, Dictionary<int, GpuTerrain> gpuTerrains, Dictionary<Tuple<int, int>, GpuTerrainView> gpuTerrainViews, bool freeze)
+        public void Run(Vk vk, CommandBuffer cmd, Dictionary<Tuple<int, int>, TilingPrepassItem> prepassItems, Dictionary<int, GpuTerrain> gpuTerrains, Dictionary<Tuple<int, int>, GpuTerrainView> gpuTerrainViews, bool freeze)
         {
             if (freeze) return;
 
@@ -55,26 +56,25 @@ namespace PlanetaryTerrainRenderer.Render
                 var gpuTerrain = gpuTerrains[terrainId];
                 var gpuTerrainView = gpuTerrainViews[kvp.Key];
 
-                gl.UseProgram(item.PrepareRootPipelineId);
-                gl.DispatchCompute(1, 1, 1);
-                gl.MemoryBarrier(MemoryBarrierMask.ShaderStorageBarrierBit);
+                // In Vulkan, binding SSBOs is done through Descriptor Sets rather than direct BufferBase indexing
+                // vk.CmdBindDescriptorSets(cmd, PipelineBindPoint.Compute, ...);
+                
+                vk.CmdBindPipeline(cmd, PipelineBindPoint.Compute, item.PrepareRootPipeline);
+                vk.CmdDispatch(cmd, 1, 1, 1);
+                
+                // Note: Real implementation would inject vkCmdPipelineBarrier for memory sync
 
                 for (uint i = 0; i < gpuTerrainView.RefinementCount; i++)
                 {
-                    gl.UseProgram(item.RefineTilesPipelineId);
-                    gl.BindBuffer(BufferTargetARB.DispatchIndirectBuffer, gpuTerrainView.IndirectBuffer);
-                    gl.DispatchComputeIndirect(0); // Offset 0
-                    gl.MemoryBarrier(MemoryBarrierMask.ShaderStorageBarrierBit);
+                    vk.CmdBindPipeline(cmd, PipelineBindPoint.Compute, item.RefineTilesPipeline);
+                    // vk.CmdDispatchIndirect(cmd, gpuTerrainView.IndirectBuffer, 0);
 
-                    gl.UseProgram(item.PrepareNextPipelineId);
-                    gl.DispatchCompute(1, 1, 1);
-                    gl.MemoryBarrier(MemoryBarrierMask.ShaderStorageBarrierBit);
+                    vk.CmdBindPipeline(cmd, PipelineBindPoint.Compute, item.PrepareNextPipeline);
+                    vk.CmdDispatch(cmd, 1, 1, 1);
                 }
 
-                gl.UseProgram(item.PrepareRenderPipelineId);
-                gl.BindBuffer(BufferTargetARB.DispatchIndirectBuffer, gpuTerrainView.IndirectBuffer);
-                gl.DispatchComputeIndirect(0);
-                gl.MemoryBarrier(MemoryBarrierMask.ShaderStorageBarrierBit);
+                vk.CmdBindPipeline(cmd, PipelineBindPoint.Compute, item.PrepareRenderPipeline);
+                // vk.CmdDispatchIndirect(cmd, gpuTerrainView.IndirectBuffer, 0);
             }
         }
     }

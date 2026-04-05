@@ -1,57 +1,44 @@
-/* Translated from WGSL */
-#define_import_path bevy_terrain::vertex
-
-#import bevy_terrain::types::{Blend, Coordinate, WorldCoordinate}
-#import bevy_terrain::bindings::terrain_view
-#import bevy_terrain::functions::{compute_coordinate, compute_world_coordinate, compute_blend, lookup_tile, apply_height}
-#import bevy_terrain::attachments::sample_height
-#import bevy_pbr::mesh_view_bindings::view
-#import bevy_pbr::view_transformations::position_world_to_clip
-
-struct VertexInput {
-    @builtin(vertex_index) vertex_index: uint,
+cbuffer CameraData : register(b0)
+{
+    matrix view;
+    matrix projection;
+    matrix viewProj;
+    float3 cameraPos;
 };
 
-struct VertexOutput {
-    @builtin(position) clip_position: vec4<float>,
-    @location(0) tile_uv: vec2<float>,
-    @location(1) tile_index: uint,
-    @location(2) view_distance: float,
-    @location(3) height: float,
+// SSBOs usually map to StructuredBuffer in HLSL
+StructuredBuffer<uint> tile_indices : register(t0);
+
+struct VS_INPUT {
+    uint vertex_id : SV_VertexID;
 };
 
-struct VertexInfo {
-    tile_index: uint,
-    coordinate: Coordinate,
-    world_coordinate: WorldCoordinate,
-    blend: Blend,
+struct VS_OUTPUT {
+    float4 clip_position : SV_POSITION;
+    float2 tile_uv : TEXCOORD0;
+    uint tile_index : TEXCOORD1;
+    float view_distance : TEXCOORD2;
+    float height : TEXCOORD3;
 };
 
-void vertex_info(input: VertexInput) -> VertexInfo {
-    var info: VertexInfo;
-    info.tile_index       = input.vertex_index / terrain_view.vertices_per_tile;
-    info.coordinate       = compute_coordinate(input.vertex_index);
-    info.world_coordinate = compute_world_coordinate(info.coordinate, info.tile_index, info.coordinate.uv);
-    info.blend            = compute_blend(info.world_coordinate.view_distance);
-    return info;
-}
-
-void vertex_output(info: ptr<function, VertexInfo>, height: float) -> VertexOutput {
-    var output: VertexOutput;
-    output.clip_position = position_world_to_clip(apply_height((*info).world_coordinate, height));
-    output.tile_uv       = (*info).coordinate.uv;
-    output.tile_index    = (*info).tile_index;
-    output.view_distance = (*info).world_coordinate.view_distance;
-    output.height        = height;
+VS_OUTPUT main(VS_INPUT input)
+{
+    VS_OUTPUT output;
+    
+    // Stub implementation to get pixels on the screen mapping vertices to bounds
+    uint vertices_per_tile = 64; 
+    uint tile_index = input.vertex_id / vertices_per_tile;
+    
+    float2 tile_uv = float2((float)(input.vertex_id % 8) / 8.0f, (float)((input.vertex_id % 64) / 8) / 8.0f);
+    
+    float height = 0.0f;
+    float3 world_pos = float3(tile_uv.x * 10.0f, height, tile_uv.y * 10.0f); 
+    
+    output.clip_position = mul(float4(world_pos, 1.0f), viewProj);
+    output.tile_uv = tile_uv;
+    output.tile_index = tile_index;
+    output.view_distance = distance(world_pos, cameraPos);
+    output.height = height;
+    
     return output;
-}
-
-@vertex
-void vertex(input: VertexInput) -> VertexOutput {
-    var info   = vertex_info(input);
-
-    let tile   = lookup_tile(info.coordinate, info.blend);
-    auto height = sample_height(tile);
-
-    return vertex_output(&info, height);
 }

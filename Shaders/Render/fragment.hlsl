@@ -1,111 +1,33 @@
-/* Translated from WGSL */
-#define_import_path bevy_terrain::fragment
+Texture2DArray tileAtlas : register(t0);
+SamplerState atlasSampler : register(s0);
 
-#import bevy_terrain::types::{Blend, Coordinate, WorldCoordinate, AtlasTile, TangentSpace}
-#import bevy_terrain::bindings::{terrain, terrain_view, geometry_tiles, approximate_height}
-#import bevy_terrain::functions::{compute_coordinate, compute_world_coordinate, compute_blend, compute_tangent_space, lookup_tile, apply_height, high_precision}
-#import bevy_terrain::attachments::{sample_height_mask, sample_surface_gradient}
-#import bevy_terrain::debug::{show_data_lod, show_geometry_lod, show_tile_tree, show_pixels}
-#import bevy_pbr::mesh_view_bindings::view
-#import bevy_pbr::pbr_types::{PbrInput, pbr_input_new}
-#import bevy_pbr::pbr_functions::{calculate_view, apply_pbr_lighting}
-
-struct FragmentInput {
-    @builtin(position) clip_position: vec4<float>,
-    @location(0) tile_uv: vec2<float>,
-    @location(1) tile_index: uint,
-    @location(2) view_distance: float,
-    @location(3) height: float,
+struct PS_INPUT {
+    float4 clip_position : SV_POSITION;
+    float2 tile_uv : TEXCOORD0;
+    uint tile_index : TEXCOORD1;
+    float view_distance : TEXCOORD2;
+    float height : TEXCOORD3;
 };
 
-struct FragmentOutput {
-    @location(0) color: vec4<float>
+struct PS_OUTPUT {
+    float4 color : SV_Target;
 };
 
-struct FragmentInfo {
-    clip_position: vec4<float>,
-    tile_index: uint,
-    height: float,
-    coordinate: Coordinate,
-    world_coordinate: WorldCoordinate,
-    tangent_space: TangentSpace,
-    blend: Blend,
-};
-
-void fragment_info(input: FragmentInput) -> FragmentInfo{
-    var info: FragmentInfo;
-    info.clip_position    = input.clip_position;
-    info.tile_index       = input.tile_index;
-    info.height           = input.height;
-    info.coordinate       = compute_coordinate(input.tile_index, input.tile_uv);
-    info.world_coordinate = compute_world_coordinate(info.coordinate, input.height, input.view_distance);
-    info.tangent_space    = compute_tangent_space(info.world_coordinate);
-    info.blend            = compute_blend(info.world_coordinate.view_distance);
-    return info;
-}
-
-void fragment_output(info: ptr<function, FragmentInfo>, output: ptr<function, FragmentOutput>, color: vec4<float>, surface_gradient: vec3<float>) {
-    const auto world_position = vec4<float>(apply_height((*info).world_coordinate, (*info).height), 1.0);
-
-#ifdef LIGHTING
-    var pbr_input: PbrInput                 = pbr_input_new();
-    pbr_input.material.base_color           = color;
-    pbr_input.material.perceptual_roughness = 1.0;
-    pbr_input.material.reflectance          = vec3<float>(0.0);
-    pbr_input.frag_coord                    = (*info).clip_position;
-    pbr_input.world_position                = world_position;
-    pbr_input.world_normal                  = (*info).world_coordinate.normal;
-    pbr_input.N                             = normalize((*info).world_coordinate.normal - surface_gradient);
-    pbr_input.V                             = calculate_view(world_position, pbr_input.is_orthographic);
-
-    (*output).color = apply_pbr_lighting(pbr_input);
-#else
-    (*output).color = color;
-#endif
-}
-
-void fragment_debug(info: ptr<function, FragmentInfo>, output: ptr<function, FragmentOutput>, tile: AtlasTile, surface_gradient: vec3<float>) {
-    const auto normal = normalize((*info).world_coordinate.normal - surface_gradient);
-
-#ifdef SHOW_DATA_LOD
-    (*output).color = show_data_lod((*info).blend, tile);
-#endif
-#ifdef SHOW_GEOMETRY_LOD
-    (*output).color = show_geometry_lod((*info).coordinate, (*info).tile_index);
-#endif
-#ifdef SHOW_TILE_TREE
-    (*output).color = show_tile_tree((*info).coordinate, (*info).world_coordinate);
-#endif
-#ifdef SHOW_PIXELS
-    (*output).color = mix((*output).color, show_pixels(tile), 0.5);
-#endif
-#ifdef SHOW_UV
-    (*output).color = vec4<float>(tile.coordinate.uv, 0.0, 1.0);
-#endif
-#ifdef SHOW_NORMALS
-    (*output).color = vec4<float>(normal, 1.0);
-    // (*output).color = vec4<float>(surface_gradient, 1.0);
-#endif
-#ifdef TEST3
-    if (high_precision((*info).world_coordinate.view_distance)) {
-        (*output).color = mix((*output).color, vec4<float>(0.3), 0.5);
+PS_OUTPUT main(PS_INPUT input)
+{
+    PS_OUTPUT output;
+    
+    // Basic Albedo mapping proxying to the Atlas layer instead of complex Bevy Tangent space PBR
+    // Atlas Z layer correlates to v_TileIndex in memory
+    float4 tex_color = tileAtlas.Sample(atlasSampler, float3(input.tile_uv, (float)input.tile_index));
+    
+    // Stub visualization indicating mesh grid bounds and tile indices visually!
+    output.color = lerp(tex_color, float4(0.5f, 0.5f, 0.5f, 1.0f), 0.5f);
+    
+    // Dummy wireframe border highlight to see quadnodes
+    if (input.tile_uv.x < 0.02f || input.tile_uv.x > 0.98f || input.tile_uv.y < 0.02f || input.tile_uv.y > 0.98f) {
+        output.color = float4(1.0f, 0.0f, 0.0f, 1.0f); // Red borders for LOD edges
     }
-#endif
-}
-
-@fragment
-void fragment(input: FragmentInput) -> FragmentOutput {
-    auto info = fragment_info(input);
-
-    let tile             = lookup_tile(info.coordinate, info.blend);
-    let mask             = sample_height_mask(tile);
-    let color            = vec4<float>(0.5);
-    const auto surface_gradient = sample_surface_gradient(tile, info.tangent_space);
-
-    if (mask) { discard; }
-
-    var output: FragmentOutput;
-    fragment_output(&info, &output, color, surface_gradient);
-    fragment_debug(&info, &output, tile, surface_gradient);
-    return FragmentOutput(vec4<float>(output.color.xyz, 1.0));
+    
+    return output;
 }
