@@ -27,7 +27,7 @@ VS_OUTPUT main(VS_INPUT input)
     output.tile_uv = world_pos.xz * 0.01f;
     output.tile_index = 0;
     output.view_distance = 0;
-    output.height = world_pos.y;
+    output.height = length(world_pos) - 100.0f;
     
     return output;
 }

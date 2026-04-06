@@ -15,7 +15,7 @@ PS_OUTPUT main(PS_INPUT input)
     PS_OUTPUT output;
     
     // Simply color based on height
-    float normalized_height = saturate(input.height / 25.0f);
+    float normalized_height = saturate((input.height - 7.0f) / 8.0f);
     
     // Map from blue (low) to green (mid) to white (high)
     float3 low_color = float3(0.1f, 0.3f, 0.8f); // Water-ish
