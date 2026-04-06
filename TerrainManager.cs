@@ -14,6 +14,7 @@ namespace PlanetaryTerrainRenderer
         public IReadOnlyList<TerrainInstance> Terrains => _terrains;
         // Native GPU Buffer validation tracking
         public Render.GpuBuffer<float> DebugVertexBuffer;
+        public Render.GpuBuffer<uint> DebugIndexBuffer;
 
         public TerrainManager(Vk vk, Device device, PhysicalDevice physicalDevice)
         {
@@ -64,6 +65,32 @@ namespace PlanetaryTerrainRenderer
                 DebugVertexBuffer = new Render.GpuBuffer<float>(_vk, _device, _physicalDevice, BufferUsageFlags.VertexBufferBit, MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit, (uint)verts.Length);
                 DebugVertexBuffer.SetData(verts);
                 DebugVertexBuffer.Update();
+
+                // Generate index buffer for solid triangle mesh
+                uint[] indices = new uint[(res - 1) * (res - 1) * 6];
+                int i = 0;
+                for (uint y = 0; y < res - 1; y++)
+                {
+                    for (uint x = 0; x < res - 1; x++)
+                    {
+                        uint i0 = y * res + x;
+                        uint i1 = i0 + 1;
+                        uint i2 = i0 + res;
+                        uint i3 = i2 + 1;
+
+                        indices[i++] = i0;
+                        indices[i++] = i2;
+                        indices[i++] = i1;
+
+                        indices[i++] = i1;
+                        indices[i++] = i2;
+                        indices[i++] = i3;
+                    }
+                }
+
+                DebugIndexBuffer = new Render.GpuBuffer<uint>(_vk, _device, _physicalDevice, BufferUsageFlags.IndexBufferBit, MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit, (uint)indices.Length);
+                DebugIndexBuffer.SetData(indices);
+                DebugIndexBuffer.Update();
             }
         }
 
@@ -98,6 +125,12 @@ namespace PlanetaryTerrainRenderer
             {
                 DebugVertexBuffer.Dispose();
                 DebugVertexBuffer = null;
+            }
+
+            if (DebugIndexBuffer != null)
+            {
+                DebugIndexBuffer.Dispose();
+                DebugIndexBuffer = null;
             }
         }
     }

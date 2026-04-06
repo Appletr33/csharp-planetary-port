@@ -25,6 +25,7 @@ namespace PlanetaryTerrainRenderer
         private static SurfaceKHR surface;
         private static VulkanSwapchain swapchain = null!;
         private static ShaderCompiler shaderCompiler = null!;
+        private static HeadlessTerrainRenderer headlessRenderer = null!;
 
         private static ExtDebugUtils debugUtils = null!;
         private static DebugUtilsMessengerEXT debugMessenger;
@@ -114,8 +115,38 @@ namespace PlanetaryTerrainRenderer
 
             var layers = new[] { "VK_LAYER_KHRONOS_validation" };
             var layersPtr = (byte**)Silk.NET.Core.Native.SilkMarshal.StringArrayToPtr(layers);
-            createInfo.EnabledLayerCount = 1;
-            createInfo.PpEnabledLayerNames = layersPtr;
+
+            // Query available layers first
+            uint availableLayerCount = 0;
+            vk.EnumerateInstanceLayerProperties(ref availableLayerCount, null);
+            var availableLayers = new LayerProperties[availableLayerCount];
+            bool hasValidation = false;
+
+            fixed (LayerProperties* availableLayersPtr = availableLayers)
+            {
+                vk.EnumerateInstanceLayerProperties(ref availableLayerCount, availableLayersPtr);
+                for (int i = 0; i < availableLayerCount; i++)
+                {
+                    string layerName = Marshal.PtrToStringAnsi((nint)availableLayersPtr[i].LayerName)!;
+                    if (layerName == "VK_LAYER_KHRONOS_validation")
+                    {
+                        hasValidation = true;
+                        break;
+                    }
+                }
+            }
+
+            if (hasValidation)
+            {
+                createInfo.EnabledLayerCount = 1;
+                createInfo.PpEnabledLayerNames = layersPtr;
+            }
+            else
+            {
+                createInfo.EnabledLayerCount = 0;
+                createInfo.PpEnabledLayerNames = null;
+                Console.WriteLine("Warning: VK_LAYER_KHRONOS_validation is not available. Proceeding without validation layers.");
+            }
 
             if (vk.CreateInstance(in createInfo, null, out instance) != Result.Success)
                 throw new Exception("Failed to create Vulkan instance");
@@ -199,6 +230,11 @@ namespace PlanetaryTerrainRenderer
             // Setup Base Config
             terrainManager = new TerrainManager(vk, device, physicalDevice);
 
+            if (Headless)
+            {
+                headlessRenderer = new HeadlessTerrainRenderer(vk, device, physicalDevice, 0);
+            }
+
             var config = new TerrainConfig { Shape = TerrainShape.Plane, LodCount = 6 };
             var settings = new TerrainSettings { AtlasSize = 64 };
             var tree = new TileTree(8, 6);
@@ -243,8 +279,7 @@ namespace PlanetaryTerrainRenderer
             {
                 // Explicit RTT Execution Mapping
                 Console.WriteLine("Executing Headless RTT extraction...");
-                CommandBuffer headlessCmd = default;
-                PlanetaryTerrainRenderer.Render.HeadlessCapture.CaptureFrame(vk, device, physicalDevice, headlessCmd, default, 1280, 720, "planet_render.png");
+                headlessRenderer.RenderFrame(terrainManager, 1280, 720, "planet_render.png");
                 Console.WriteLine("Headless Capture Complete! Validation tracking successful.");
                 return;
             }
@@ -310,6 +345,7 @@ namespace PlanetaryTerrainRenderer
         {
             vk.DeviceWaitIdle(device);
             
+            headlessRenderer?.Dispose();
             terrainManager?.Dispose();
             swapchain?.Dispose();
             shaderCompiler?.Dispose();
