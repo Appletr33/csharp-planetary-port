@@ -1,9 +1,9 @@
 struct PS_INPUT {
     float4 clip_position : SV_POSITION;
-    float2 tile_uv : TEXCOORD0;
-    uint tile_index : TEXCOORD1;
-    float view_distance : TEXCOORD2;
-    float height : TEXCOORD3;
+    [[vk::location(0)]] float2 tile_uv : TEXCOORD0;
+    [[vk::location(1)]] uint tile_index : TEXCOORD1;
+    [[vk::location(2)]] float view_distance : TEXCOORD2;
+    [[vk::location(3)]] float height : TEXCOORD3;
 };
 
 struct PS_OUTPUT {

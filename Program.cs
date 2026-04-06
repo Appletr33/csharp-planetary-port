@@ -26,14 +26,24 @@ namespace PlanetaryTerrainRenderer
         private static VulkanSwapchain swapchain = null!;
         private static ShaderCompiler shaderCompiler = null!;
         private static HeadlessTerrainRenderer headlessRenderer = null!;
-
         private static ExtDebugUtils debugUtils = null!;
         private static DebugUtilsMessengerEXT debugMessenger;
-
         private static IInputContext input = null!;
         private static CameraController camera = null!;
         private static TerrainManager terrainManager = null!;
+
+        private static CommandPool commandPool;
+        private static CommandBuffer[] commandBuffers = null!;
+        private static Silk.NET.Vulkan.Semaphore[] imageAvailableSemaphores = null!;
+        private static Silk.NET.Vulkan.Semaphore[] renderFinishedSemaphores = null!;
+        private static Fence[] inFlightFences = null!;
+        private static PipelineLayout pipelineLayout;
+        private static Pipeline graphicsPipeline;
+        private static uint currentFrame = 0;
+        private const int MAX_FRAMES_IN_FLIGHT = 2;
+
         public static bool Headless { get; private set; } = false;
+        private static bool isMouseLocked = true;
 
         private static System.Numerics.Vector2 lastMousePos;
 
@@ -69,6 +79,11 @@ namespace PlanetaryTerrainRenderer
             {
                 window.Initialize();
                 OnLoad();
+                
+                // Ensure terrain extraction happens before the headless render
+                terrainManager.Update();
+                terrainManager.ExtractAndPrepare();
+                
                 OnRender(0.0);
                 OnClose();
             }
@@ -179,7 +194,12 @@ namespace PlanetaryTerrainRenderer
                     input.Keyboards[i].KeyDown += KeyDown;
 
                 for (int i = 0; i < input.Mice.Count; i++)
+                {
                     input.Mice[i].MouseMove += OnMouseMove;
+                    input.Mice[i].MouseDown += OnMouseDown;
+                    input.Mice[i].Scroll += OnMouseScroll;
+                    input.Mice[i].Cursor.CursorMode = CursorMode.Disabled;
+                }
             }
 
             uint deviceCount = 0;
@@ -248,18 +268,199 @@ namespace PlanetaryTerrainRenderer
 
             terrainManager.AddTerrain(terrainInstance);
 
+            if (!Headless)
+            {
+                CreateSyncObjects();
+                CreateCommandPool();
+                CreateCommandBuffers();
+                CreateGraphicsPipeline();
+            }
+
             if (Headless)
                 Console.WriteLine("Running in headless mode. Initialized Vulkan successfully!");
+        }
+
+        private static void CreateSyncObjects()
+        {
+            var semaphoreInfo = new SemaphoreCreateInfo { SType = StructureType.SemaphoreCreateInfo };
+            var fenceInfo = new FenceCreateInfo { SType = StructureType.FenceCreateInfo, Flags = FenceCreateFlags.SignaledBit };
+
+            imageAvailableSemaphores = new Silk.NET.Vulkan.Semaphore[MAX_FRAMES_IN_FLIGHT];
+            renderFinishedSemaphores = new Silk.NET.Vulkan.Semaphore[MAX_FRAMES_IN_FLIGHT];
+            inFlightFences = new Fence[MAX_FRAMES_IN_FLIGHT];
+
+            for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+            {
+                vk.CreateSemaphore(device, in semaphoreInfo, null, out imageAvailableSemaphores[i]);
+                vk.CreateSemaphore(device, in semaphoreInfo, null, out renderFinishedSemaphores[i]);
+                vk.CreateFence(device, in fenceInfo, null, out inFlightFences[i]);
+            }
+        }
+
+        private static void CreateCommandPool()
+        {
+            var poolInfo = new CommandPoolCreateInfo
+            {
+                SType = StructureType.CommandPoolCreateInfo,
+                QueueFamilyIndex = 0,
+                Flags = CommandPoolCreateFlags.ResetCommandBufferBit
+            };
+
+            if (vk.CreateCommandPool(device, in poolInfo, null, out commandPool) != Result.Success)
+                throw new Exception("Failed to create command pool.");
+        }
+
+        private static void CreateCommandBuffers()
+        {
+            commandBuffers = new CommandBuffer[swapchain.Framebuffers.Length];
+
+            var allocInfo = new CommandBufferAllocateInfo
+            {
+                SType = StructureType.CommandBufferAllocateInfo,
+                CommandPool = commandPool,
+                Level = CommandBufferLevel.Primary,
+                CommandBufferCount = (uint)commandBuffers.Length
+            };
+
+            fixed (CommandBuffer* ptr = commandBuffers)
+            {
+                if (vk.AllocateCommandBuffers(device, in allocInfo, ptr) != Result.Success)
+                    throw new Exception("Failed to allocate command buffers.");
+            }
+        }
+
+        private static void CreateGraphicsPipeline()
+        {
+            var vertShaderCode = shaderCompiler.CompileHLSL(File.ReadAllText("Shaders/Render/vertex.hlsl"), "vertex.hlsl", ShaderKind.VertexShader);
+            var fragShaderCode = shaderCompiler.CompileHLSL(File.ReadAllText("Shaders/Render/fragment.hlsl"), "fragment.hlsl", ShaderKind.FragmentShader);
+
+            var vertModule = CreateShaderModule(vertShaderCode);
+            var fragModule = CreateShaderModule(fragShaderCode);
+
+            var vertStage = new PipelineShaderStageCreateInfo
+            {
+                SType = StructureType.PipelineShaderStageCreateInfo,
+                Stage = ShaderStageFlags.VertexBit,
+                Module = vertModule,
+                PName = (byte*)Marshal.StringToHGlobalAnsi("main")
+            };
+
+            var fragStage = new PipelineShaderStageCreateInfo
+            {
+                SType = StructureType.PipelineShaderStageCreateInfo,
+                Stage = ShaderStageFlags.FragmentBit,
+                Module = fragModule,
+                PName = (byte*)Marshal.StringToHGlobalAnsi("main")
+            };
+
+            var stages = stackalloc[] { vertStage, fragStage };
+
+            var bindingDescription = new VertexInputBindingDescription { Binding = 0, Stride = (uint)sizeof(float) * 3, InputRate = VertexInputRate.Vertex };
+            var attributeDescription = new VertexInputAttributeDescription { Binding = 0, Location = 0, Format = Format.R32G32B32Sfloat, Offset = 0 };
+
+            var vertexInputInfo = new PipelineVertexInputStateCreateInfo
+            {
+                SType = StructureType.PipelineVertexInputStateCreateInfo,
+                VertexBindingDescriptionCount = 1,
+                PVertexBindingDescriptions = &bindingDescription,
+                VertexAttributeDescriptionCount = 1,
+                PVertexAttributeDescriptions = &attributeDescription
+            };
+
+            var inputAssembly = new PipelineInputAssemblyStateCreateInfo { SType = StructureType.PipelineInputAssemblyStateCreateInfo, Topology = PrimitiveTopology.TriangleList };
+            var viewportState = new PipelineViewportStateCreateInfo { SType = StructureType.PipelineViewportStateCreateInfo, ViewportCount = 1, ScissorCount = 1 };
+            var rasterizer = new PipelineRasterizationStateCreateInfo { SType = StructureType.PipelineRasterizationStateCreateInfo, PolygonMode = PolygonMode.Fill, LineWidth = 1.0f, CullMode = CullModeFlags.None, FrontFace = FrontFace.CounterClockwise };
+            var multisampling = new PipelineMultisampleStateCreateInfo { SType = StructureType.PipelineMultisampleStateCreateInfo, RasterizationSamples = SampleCountFlags.Count1Bit };
+            var depthStencil = new PipelineDepthStencilStateCreateInfo { SType = StructureType.PipelineDepthStencilStateCreateInfo, DepthTestEnable = Vk.True, DepthWriteEnable = Vk.True, DepthCompareOp = CompareOp.Less };
+            var colorBlendAttachment = new PipelineColorBlendAttachmentState { ColorWriteMask = ColorComponentFlags.RBit | ColorComponentFlags.GBit | ColorComponentFlags.BBit | ColorComponentFlags.ABit, BlendEnable = Vk.False };
+            var colorBlending = new PipelineColorBlendStateCreateInfo { SType = StructureType.PipelineColorBlendStateCreateInfo, AttachmentCount = 1, PAttachments = &colorBlendAttachment };
+            var dynamicStates = stackalloc[] { DynamicState.Viewport, DynamicState.Scissor };
+            var dynamicStateInfo = new PipelineDynamicStateCreateInfo { SType = StructureType.PipelineDynamicStateCreateInfo, DynamicStateCount = 2, PDynamicStates = dynamicStates };
+
+            var pushConstantRange = new PushConstantRange { StageFlags = ShaderStageFlags.VertexBit, Offset = 0, Size = (uint)sizeof(Matrix4X4<float>) };
+            var pipelineLayoutInfo = new PipelineLayoutCreateInfo { SType = StructureType.PipelineLayoutCreateInfo, SetLayoutCount = 0, PushConstantRangeCount = 1, PPushConstantRanges = &pushConstantRange };
+
+            vk.CreatePipelineLayout(device, in pipelineLayoutInfo, null, out pipelineLayout);
+
+            var pipelineInfo = new GraphicsPipelineCreateInfo
+            {
+                SType = StructureType.GraphicsPipelineCreateInfo,
+                StageCount = 2,
+                PStages = stages,
+                PVertexInputState = &vertexInputInfo,
+                PInputAssemblyState = &inputAssembly,
+                PViewportState = &viewportState,
+                PRasterizationState = &rasterizer,
+                PMultisampleState = &multisampling,
+                PDepthStencilState = &depthStencil,
+                PColorBlendState = &colorBlending,
+                PDynamicState = &dynamicStateInfo,
+                Layout = pipelineLayout,
+                RenderPass = swapchain.RenderPass,
+                Subpass = 0
+            };
+
+            vk.CreateGraphicsPipelines(device, default, 1, in pipelineInfo, null, out graphicsPipeline);
+
+            vk.DestroyShaderModule(device, vertModule, null);
+            vk.DestroyShaderModule(device, fragModule, null);
+            Marshal.FreeHGlobal((nint)vertStage.PName);
+            Marshal.FreeHGlobal((nint)fragStage.PName);
+        }
+
+        private static ShaderModule CreateShaderModule(byte[] code)
+        {
+            fixed (byte* ptr = code)
+            {
+                var createInfo = new ShaderModuleCreateInfo { SType = StructureType.ShaderModuleCreateInfo, CodeSize = (nuint)code.Length, PCode = (uint*)ptr };
+                vk.CreateShaderModule(device, in createInfo, null, out var module);
+                return module;
+            }
         }
 
         private static void KeyDown(IKeyboard keyboard, Key key, int arg3)
         {
             if (key == Key.Escape)
-                window.Close();
+            {
+                if (isMouseLocked)
+                {
+                    isMouseLocked = false;
+                    foreach (var mouse in input.Mice)
+                        mouse.Cursor.CursorMode = CursorMode.Normal;
+                }
+                else
+                {
+                    window.Close();
+                }
+            }
+        }
+
+        private static void OnMouseDown(IMouse mouse, MouseButton button)
+        {
+            if (!isMouseLocked)
+            {
+                isMouseLocked = true;
+                foreach (var m in input.Mice)
+                    m.Cursor.CursorMode = CursorMode.Disabled;
+            }
+        }
+
+        private static void OnMouseScroll(IMouse mouse, ScrollWheel scrollWheel)
+        {
+            if (scrollWheel.Y > 0)
+                camera.MovementSpeed *= 1.2f;
+            else if (scrollWheel.Y < 0)
+                camera.MovementSpeed /= 1.2f;
+
+            // Clamp speed to a reasonable range
+            camera.MovementSpeed = System.Math.Clamp(camera.MovementSpeed, 0.1f, 1000000.0f);
+            Console.WriteLine($"Camera Speed: {camera.MovementSpeed:F2}");
         }
 
         private static void OnMouseMove(IMouse mouse, System.Numerics.Vector2 position)
         {
+            if (!isMouseLocked) return;
+
             if (lastMousePos == default)
             {
                 lastMousePos = position;
@@ -284,35 +485,97 @@ namespace PlanetaryTerrainRenderer
                 return;
             }
 
-            // Wait for image to become available
-            // Note: A complete swapchain requires synchronised semaphores (ImageAvailable, RenderFinished)
+            vk.WaitForFences(device, 1, in inFlightFences[currentFrame], Vk.True, ulong.MaxValue);
+
             uint imageIndex = 0;
-            // Assuming extension is fetched...
-            // khrSwapchain.AcquireNextImage(device, swapchain.Swapchain, ulong.MaxValue, imageAvailableSemaphore, default, ref imageIndex);
+            var khrSwapchain = new KhrSwapchain(vk.Context);
+            khrSwapchain.AcquireNextImage(device, swapchain.Swapchain, ulong.MaxValue, imageAvailableSemaphores[currentFrame], default, ref imageIndex);
 
-            CommandBuffer cmd = default; 
+            vk.ResetFences(device, 1, in inFlightFences[currentFrame]);
 
-            // Standard Graphics Render Pass Bindings
+            var cmd = commandBuffers[imageIndex];
+            vk.ResetCommandBuffer(cmd, 0);
+
+            var beginInfo = new CommandBufferBeginInfo { SType = StructureType.CommandBufferBeginInfo };
+            vk.BeginCommandBuffer(cmd, in beginInfo);
+
+            var clearValues = stackalloc ClearValue[2];
+            clearValues[0].Color = new ClearColorValue(0.1f, 0.1f, 0.1f, 1.0f);
+            clearValues[1].DepthStencil = new ClearDepthStencilValue(1.0f, 0);
+
             var renderPassBeginInfo = new RenderPassBeginInfo
             {
                 SType = StructureType.RenderPassBeginInfo,
                 RenderPass = swapchain.RenderPass,
                 Framebuffer = swapchain.Framebuffers[imageIndex],
-                RenderArea = new Rect2D(new Offset2D(0, 0), swapchain.Extent)
+                RenderArea = new Rect2D(new Offset2D(0, 0), swapchain.Extent),
+                ClearValueCount = 2,
+                PClearValues = clearValues
             };
 
-            var clearColor = new ClearValue { Color = new ClearColorValue(0.1f, 0.1f, 0.1f, 1.0f) };
-            renderPassBeginInfo.ClearValueCount = 1;
-            renderPassBeginInfo.PClearValues = &clearColor;
+            vk.CmdBeginRenderPass(cmd, in renderPassBeginInfo, SubpassContents.Inline);
+            vk.CmdBindPipeline(cmd, PipelineBindPoint.Graphics, graphicsPipeline);
 
-            // vk.CmdBeginRenderPass(cmd, in renderPassBeginInfo, SubpassContents.Inline);
-            
-            terrainManager.RenderOpaquePass(cmd, default);
+            var viewport = new Viewport { X = 0, Y = 0, Width = swapchain.Extent.Width, Height = swapchain.Extent.Height, MinDepth = 0, MaxDepth = 1 };
+            vk.CmdSetViewport(cmd, 0, 1, &viewport);
 
-            // vk.CmdEndRenderPass(cmd);
+            var scissor = new Rect2D { Offset = new Offset2D(0, 0), Extent = swapchain.Extent };
+            vk.CmdSetScissor(cmd, 0, 1, &scissor);
 
-            // Queue presentation...
-            // khrSwapchain.QueuePresent(queue, in presentInfo);
+            var view = Matrix4X4.CreateLookAt(new Vector3D<float>(camera.Position.X, camera.Position.Y, camera.Position.Z), 
+                                              new Vector3D<float>(camera.Position.X + camera.Forward.X, camera.Position.Y + camera.Forward.Y, camera.Position.Z + camera.Forward.Z), 
+                                              new Vector3D<float>(0, 1, 0));
+            var proj = Matrix4X4.CreatePerspectiveFieldOfView((float)System.Math.PI / 4f, (float)window.Size.X / window.Size.Y, 0.1f, 10000000f);
+            proj.M22 *= -1;
+            var viewProj = view * proj;
+
+            vk.CmdPushConstants(cmd, pipelineLayout, ShaderStageFlags.VertexBit, 0, (uint)sizeof(Matrix4X4<float>), &viewProj);
+
+            if (terrainManager.DebugVertexBuffer != null)
+            {
+                var vertexBuffer = terrainManager.DebugVertexBuffer.Handle;
+                ulong offset = 0;
+                vk.CmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer, &offset);
+                vk.CmdBindIndexBuffer(cmd, terrainManager.DebugIndexBuffer.Handle, 0, IndexType.Uint32);
+                vk.CmdDrawIndexed(cmd, terrainManager.DebugIndexBuffer.SizeInBytes / sizeof(uint), 1, 0, 0, 0);
+            }
+
+            vk.CmdEndRenderPass(cmd);
+            vk.EndCommandBuffer(cmd);
+
+            var waitSemaphores = stackalloc[] { imageAvailableSemaphores[currentFrame] };
+            var waitStages = stackalloc[] { PipelineStageFlags.ColorAttachmentOutputBit };
+            var signalSemaphores = stackalloc[] { renderFinishedSemaphores[currentFrame] };
+
+            var submitInfo = new SubmitInfo
+            {
+                SType = StructureType.SubmitInfo,
+                WaitSemaphoreCount = 1,
+                PWaitSemaphores = waitSemaphores,
+                PWaitDstStageMask = waitStages,
+                CommandBufferCount = 1,
+                PCommandBuffers = &cmd,
+                SignalSemaphoreCount = 1,
+                PSignalSemaphores = signalSemaphores
+            };
+
+            vk.GetDeviceQueue(device, 0, 0, out var queue);
+            vk.QueueSubmit(queue, 1, in submitInfo, inFlightFences[currentFrame]);
+
+            var swapchains = stackalloc[] { swapchain.Swapchain };
+            var presentInfo = new PresentInfoKHR
+            {
+                SType = StructureType.PresentInfoKhr,
+                WaitSemaphoreCount = 1,
+                PWaitSemaphores = signalSemaphores,
+                SwapchainCount = 1,
+                PSwapchains = swapchains,
+                PImageIndices = &imageIndex
+            };
+
+            khrSwapchain.QueuePresent(queue, in presentInfo);
+
+            currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
         }
 
         private static void OnUpdate(double deltaTime)
@@ -336,8 +599,16 @@ namespace PlanetaryTerrainRenderer
         {
             if (swapchain != null) {
                 vk.DeviceWaitIdle(device);
+                
+                vk.FreeCommandBuffers(device, commandPool, (uint)commandBuffers.Length, commandBuffers[0]);
+                vk.DestroyPipeline(device, graphicsPipeline, null);
+                vk.DestroyPipelineLayout(device, pipelineLayout, null);
+                
                 swapchain.Dispose();
                 swapchain = new VulkanSwapchain(vk, instance, device, physicalDevice, surface, new Extent2D((uint)size.X, (uint)size.Y), PresentModeKHR.MailboxKhr);
+                
+                CreateCommandBuffers();
+                CreateGraphicsPipeline();
             }
         }
 
@@ -345,6 +616,20 @@ namespace PlanetaryTerrainRenderer
         {
             vk.DeviceWaitIdle(device);
             
+            if (!Headless)
+            {
+                for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+                {
+                    vk.DestroySemaphore(device, imageAvailableSemaphores[i], null);
+                    vk.DestroySemaphore(device, renderFinishedSemaphores[i], null);
+                    vk.DestroyFence(device, inFlightFences[i], null);
+                }
+
+                vk.DestroyCommandPool(device, commandPool, null);
+                vk.DestroyPipeline(device, graphicsPipeline, null);
+                vk.DestroyPipelineLayout(device, pipelineLayout, null);
+            }
+
             headlessRenderer?.Dispose();
             terrainManager?.Dispose();
             swapchain?.Dispose();
