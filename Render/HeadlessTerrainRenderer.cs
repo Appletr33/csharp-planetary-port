@@ -120,8 +120,8 @@ namespace PlanetaryTerrainRenderer.Render
 
         private void CreateGraphicsPipeline()
         {
-            var vertShaderCode = _shaderCompiler.CompileHLSL(File.ReadAllText("Shaders/Render/vertex.hlsl"), "vertex.hlsl", Silk.NET.Shaderc.ShaderKind.VertexShader);
-            var fragShaderCode = _shaderCompiler.CompileHLSL(File.ReadAllText("Shaders/Render/fragment.hlsl"), "fragment.hlsl", Silk.NET.Shaderc.ShaderKind.FragmentShader);
+            var vertShaderCode = _shaderCompiler.CompileHLSL(File.ReadAllText("Shaders/Render/vertex_preprocessed.hlsl"), "vertex.hlsl", Silk.NET.Shaderc.ShaderKind.VertexShader);
+            var fragShaderCode = _shaderCompiler.CompileHLSL(File.ReadAllText("Shaders/Render/fragment_preprocessed.hlsl"), "fragment.hlsl", Silk.NET.Shaderc.ShaderKind.FragmentShader);
 
             var vertShaderModule = CreateShaderModule(vertShaderCode);
             var fragShaderModule = CreateShaderModule(fragShaderCode);

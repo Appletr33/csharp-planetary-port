@@ -1,13 +1,12 @@
-/* Translated from WGSL */
-#define_import_path bevy_terrain::functions
+#ifndef FUNCTIONS_HLSL
+#define FUNCTIONS_HLSL
 
-#import bevy_terrain::bindings::{terrain, origins, terrain_view, geometry_tiles, tile_tree, view, approximate_height}
-#import bevy_terrain::types::{TileCoordinate, WorldCoordinate, TileTree, TileTreeEntry, AtlasTile, Blend, BestLookup, Coordinate, Morph, TangentSpace}
-#import bevy_render::maths::{affine3_to_square, mat2x4_float_to_mat3x3_unpack}
+#include "types.hlsl"
+#include "bindings.hlsl"
 
-const SIGMA = 0.87 * 0.87;
+#define SIGMA (0.87 * 0.87)
 
-void high_precision(view_distance: float) -> bool {
+bool high_precision(float view_distance) {
 #ifdef HIGH_PRECISION
     return view_distance < terrain_view.precision_distance;
 #else
@@ -15,40 +14,145 @@ void high_precision(view_distance: float) -> bool {
 #endif
 }
 
+void coordinate_change_lod(inout Coordinate coordinate, uint new_lod) {
+    int lod_difference = int(new_lod) - int(coordinate.lod);
+
+    if (lod_difference == 0) { return; }
+
+    float scale = exp2(float(lod_difference));
+    uint2 xy = coordinate.xy;
+    float2 uv = coordinate.uv * scale;
+
+    coordinate.lod = new_lod;
+    coordinate.xy = uint2(float2(xy) * scale) + uint2(uv.x, uv.y);
+    coordinate.uv = frac(uv) + (lod_difference > 0 ? (float2(xy % uint2(uint(1.0f / scale), uint(1.0f / scale))) * scale) : float2(0.0f, 0.0f));
+
+#ifdef FRAGMENT
+    coordinate.uv_dx *= scale;
+    coordinate.uv_dy *= scale;
+#endif
+}
+
+Coordinate compute_view_coordinate(uint face, uint lod) {
+    ViewCoordinate view_coord_data = terrain_view.coordinates[face];
+
+#ifdef FRAGMENT
+    Coordinate view_coordinate = {face, terrain_view.lod, view_coord_data.xy, view_coord_data.uv, float2(0.0f, 0.0f), float2(0.0f, 0.0f)};
+#else
+    Coordinate view_coordinate = {face, terrain_view.lod, view_coord_data.xy, view_coord_data.uv};
+#endif
+
+    coordinate_change_lod(view_coordinate, lod);
+
+    return view_coordinate;
+}
+
 #ifdef VERTEX
-void compute_coordinate(vertex_index: uint) -> Coordinate {
+Coordinate compute_coordinate(uint vertex_index) {
     // use first and last indices of the rows twice, to form degenerate triangles
-    let tile_index   = vertex_index / terrain_view.vertices_per_tile;
-    const auto column_index = vertex_index % terrain_view.vertices_per_tile / terrain_view.vertices_per_row;
-    let row_index    = clamp(vertex_index % terrain_view.vertices_per_row, 1u, terrain_view.vertices_per_row - 2u) - 1u;
-    let grid_index   = vec2<uint>(column_index + (row_index & 1u), row_index >> 1u);
+    uint tile_index   = vertex_index / terrain_view.vertices_per_tile;
+    uint column_index = vertex_index % terrain_view.vertices_per_tile / terrain_view.vertices_per_row;
+    uint row_index    = clamp(vertex_index % terrain_view.vertices_per_row, 1u, terrain_view.vertices_per_row - 2u) - 1u;
+    uint2 grid_index   = uint2(column_index + (row_index & 1u), row_index >> 1u);
 
-    let tile    = geometry_tiles[tile_index];
-    const auto tile_uv = vec2<float>(grid_index) / terrain_view.grid_size;
-    const auto even_uv = vec2<float>(grid_index & vec2<uint>(~1u)) / terrain_view.grid_size;
+    GeometryTile tile    = geometry_tiles[tile_index];
+    float2 tile_uv = float2(grid_index) / terrain_view.grid_size;
+    float2 even_uv = float2(grid_index & uint2(~1u, ~1u)) / terrain_view.grid_size;
 
-    const auto morph_ratio = mix(mix(tile.morph_ratios.x, tile.morph_ratios.y, tile_uv.x),
-                          mix(tile.morph_ratios.z, tile.morph_ratios.w, tile_uv.x), tile_uv.y);
+    float morph_ratio = lerp(lerp(tile.morph_ratios.x, tile.morph_ratios.y, tile_uv.x),
+                          lerp(tile.morph_ratios.z, tile.morph_ratios.w, tile_uv.x), tile_uv.y);
 
-    return Coordinate(tile.face, tile.lod, tile.xy, mix(tile_uv, even_uv, morph_ratio));
+    Coordinate result = {tile.face, tile.lod, tile.xy, lerp(tile_uv, even_uv, morph_ratio)};
+    return result;
 }
 #endif
 
 #ifdef FRAGMENT
-void compute_coordinate(tile_index: uint, tile_uv: vec2<float>) -> Coordinate {
-    const auto tile = geometry_tiles[tile_index];
-
-    return Coordinate(tile.face, tile.lod, tile.xy, tile_uv, dpdx(tile_uv), dpdy(tile_uv));
+Coordinate compute_coordinate(uint tile_index, float2 tile_uv) {
+    GeometryTile tile = geometry_tiles[tile_index];
+    Coordinate result = {tile.face, tile.lod, tile.xy, tile_uv, ddx(tile_uv), ddy(tile_uv)};
+    return result;
 }
 #endif
 
+WorldCoordinate compute_world_coordinate_imprecise(Coordinate coordinate, float height) {
+    float2 uv = (float2(coordinate.xy) + coordinate.uv) / exp2(float(coordinate.lod));
+
+#ifdef SPHERICAL
+    float2 xy = (2.0f * uv - 1.0f) / sqrt(1.0f - 4.0f * SIGMA * (uv - 1.0f) * uv);
+
+    float3 unit_position;
+    switch (coordinate.face) {
+        case 0u: unit_position = float3( -1.0, -xy.y,  xy.x); break;
+        case 1u: unit_position = float3( xy.x, -xy.y,   1.0); break;
+        case 2u: unit_position = float3( xy.x,   1.0,  xy.y); break;
+        case 3u: unit_position = float3(  1.0, -xy.x,  xy.y); break;
+        case 4u: unit_position = float3( xy.y, -xy.x,  -1.0); break;
+        case 5u: unit_position = float3( xy.y,  -1.0,  xy.x); break;
+        default: unit_position = float3(0.0f, 0.0f, 0.0f); break;
+    }
+
+    unit_position   = normalize(unit_position);
+    float3 unit_normal = unit_position;
+#else
+    float3 unit_position = float3(uv.x - 0.5f, 0.0f, uv.y - 0.5f);
+    float3 unit_normal   = float3(0.0f, 1.0f, 0.0f);
+#endif
+
+    float4x4 position_world_from_unit = {
+        terrain.world_from_unit[0].x, terrain.world_from_unit[1].x, terrain.world_from_unit[2].x, terrain.world_from_unit[3].x,
+        terrain.world_from_unit[0].y, terrain.world_from_unit[1].y, terrain.world_from_unit[2].y, terrain.world_from_unit[3].y,
+        terrain.world_from_unit[0].z, terrain.world_from_unit[1].z, terrain.world_from_unit[2].z, terrain.world_from_unit[3].z,
+        0.0f, 0.0f, 0.0f, 1.0f
+    };
+    float3 world_position = mul(position_world_from_unit, float4(unit_position, 1.0f)).xyz;
+
+    float3x3 normal_world_from_unit = {
+        terrain.unit_from_world_transpose_a[0].x, terrain.unit_from_world_transpose_a[0].y, terrain.unit_from_world_transpose_a[1].x,
+        terrain.unit_from_world_transpose_a[1].y, terrain.unit_from_world_transpose_a[2].x, terrain.unit_from_world_transpose_a[2].y,
+        terrain.unit_from_world_transpose_a[3].x, terrain.unit_from_world_transpose_a[3].y, terrain.unit_from_world_transpose_b
+    };
+    float3 world_normal = normalize(mul(normal_world_from_unit, unit_normal));
+
+    float view_distance = distance(world_position + height * world_normal, terrain_view.world_position);
+
+    WorldCoordinate wc = {world_position, world_normal, view_distance};
+    return wc;
+}
+
+#ifdef HIGH_PRECISION
+WorldCoordinate compute_world_coordinate_precise(Coordinate coordinate, float height) {
+    Coordinate view_coordinate = compute_view_coordinate(coordinate.face, coordinate.lod);
+
+    float2 relative_uv = (float2(int2(coordinate.xy) - int2(view_coordinate.xy)) + coordinate.uv - view_coordinate.uv) / exp2(float(coordinate.lod));
+    float u = relative_uv.x;
+    float v = relative_uv.y;
+
+    SurfaceApproximation approximation = terrain_view.surface_approximation[coordinate.face];
+
+    float3 world_position = approximation.p + approximation.p_u * u + approximation.p_v * v +
+                         approximation.p_uu * u * u + approximation.p_uv * u * v + approximation.p_vv * v * v;
+    float3 world_normal = normalize(cross(approximation.p_v, approximation.p_u));
+
+    float view_distance = distance(world_position + height * world_normal, terrain_view.world_position);
+
+    WorldCoordinate wc = {world_position, world_normal, view_distance};
+    return wc;
+}
+#else
+WorldCoordinate compute_world_coordinate_precise(Coordinate coordinate, float height) {
+    WorldCoordinate wc = {float3(0.0f, 0.0f, 0.0f), float3(0.0f, 0.0f, 0.0f), 0.0f};
+    return wc;
+}
+#endif
 
 #ifdef PREPASS
-void compute_world_coordinate(coordinate: Coordinate) -> WorldCoordinate {
-    auto world_coordinate = compute_world_coordinate_imprecise(coordinate, approximate_height);
+WorldCoordinate compute_world_coordinate(Coordinate coordinate) {
+    float height = 0.0f; // Mock height for prepass as it uses approximate height bounds
+    WorldCoordinate world_coordinate = compute_world_coordinate_imprecise(coordinate, height);
 
     if (high_precision(world_coordinate.view_distance)) {
-        world_coordinate = compute_world_coordinate_precise(coordinate, approximate_height);
+        world_coordinate = compute_world_coordinate_precise(coordinate, height);
     }
 
     return world_coordinate;
@@ -56,188 +160,102 @@ void compute_world_coordinate(coordinate: Coordinate) -> WorldCoordinate {
 #endif
 
 #ifdef VERTEX
-void compute_world_coordinate(coordinate: Coordinate, tile_index: uint, tile_uv: vec2<float>) -> WorldCoordinate {
-    let tile          = geometry_tiles[tile_index];
-    const auto view_distance = mix(mix(tile.view_distances.x, tile.view_distances.y, tile_uv.x),
-                            mix(tile.view_distances.z, tile.view_distances.w, tile_uv.x), tile_uv.y);
+WorldCoordinate compute_world_coordinate(Coordinate coordinate, uint tile_index, float2 tile_uv) {
+    GeometryTile tile = geometry_tiles[tile_index];
+    float view_distance = lerp(lerp(tile.view_distances.x, tile.view_distances.y, tile_uv.x),
+                            lerp(tile.view_distances.z, tile.view_distances.w, tile_uv.x), tile_uv.y);
 
-    if (high_precision(view_distance)) { return compute_world_coordinate_precise(coordinate, approximate_height); }
-    else {                               return compute_world_coordinate_imprecise(coordinate, approximate_height); }
+    if (high_precision(view_distance)) { return compute_world_coordinate_precise(coordinate, 0.0f); }
+    else {                               return compute_world_coordinate_imprecise(coordinate, 0.0f); }
 }
 #endif
 
 #ifdef FRAGMENT
-void compute_world_coordinate(coordinate: Coordinate, height: float, view_distance: float) -> WorldCoordinate {
+WorldCoordinate compute_world_coordinate(Coordinate coordinate, float height, float view_distance) {
     if (high_precision(view_distance)) { return compute_world_coordinate_precise(coordinate, height); }
     else {                               return compute_world_coordinate_imprecise(coordinate, height); }
 }
 #endif
 
-void compute_world_coordinate_imprecise(coordinate: Coordinate, height: float) -> WorldCoordinate {
-    const auto uv = (vec2<float>(coordinate.xy) + coordinate.uv) / exp2(float(coordinate.lod));
+TangentSpace compute_tangent_space(WorldCoordinate world_coordinate) {
+    float3 position_dx = ddx(world_coordinate.position);
+    float3 position_dy = ddy(world_coordinate.position);
 
-#ifdef SPHERICAL
-    const auto xy = (2.0 * uv - 1.0) / sqrt(1.0 - 4.0 * SIGMA * (uv - 1.0) * uv);
+    float3 tangent_x = cross(position_dy, world_coordinate.normal);
+    float3 tangent_y = cross(world_coordinate.normal, position_dx);
+    float scale = 1.0f / dot(position_dx, tangent_x);
 
-    // this is faster than the CPU SIDE_MATRICES approach
-    var unit_position: vec3<float>;
-    switch (coordinate.face) {
-        case 0u: { unit_position = vec3( -1.0, -xy.y,  xy.x); }
-        case 1u: { unit_position = vec3( xy.x, -xy.y,   1.0); }
-        case 2u: { unit_position = vec3( xy.x,   1.0,  xy.y); }
-        case 3u: { unit_position = vec3(  1.0, -xy.x,  xy.y); }
-        case 4u: { unit_position = vec3( xy.y, -xy.x,  -1.0); }
-        case 5u: { unit_position = vec3( xy.y,  -1.0,  xy.x); }
-        case default: {}
-    }
-
-    unit_position   = normalize(unit_position);
-    const auto unit_normal = unit_position;
-#else
-    const auto unit_position = vec3<float>(uv.x - 0.5, 0.0, uv.y - 0.5);
-    let unit_normal   = vec3<float>(0.0, 1.0, 0.0);
-#endif
-
-    const auto position_world_from_unit = affine3_to_square(terrain.world_from_unit);
-    let world_position           = (position_world_from_unit * vec4<float>(unit_position, 1.0)).xyz;
-
-    const auto normal_world_from_unit = mat2x4_float_to_mat3x3_unpack(terrain.unit_from_world_transpose_a, terrain.unit_from_world_transpose_b);
-    let world_normal           = normalize(normal_world_from_unit * unit_normal);
-
-    const auto view_distance = distance(world_position + height * world_normal, terrain_view.world_position);
-
-    return WorldCoordinate(world_position, world_normal, view_distance);
+    TangentSpace ts = {tangent_x, tangent_y, scale};
+    return ts;
 }
 
-#ifdef HIGH_PRECISION
-void compute_world_coordinate_precise(coordinate: Coordinate, height: float) -> WorldCoordinate {
-    const auto view_coordinate = compute_view_coordinate(coordinate.face, coordinate.lod);
-
-    const auto relative_uv = (vec2<float>(vec2<int>(coordinate.xy) - vec2<int>(view_coordinate.xy)) + coordinate.uv - view_coordinate.uv) / exp2(float(coordinate.lod));
-    const auto u = relative_uv.x;
-    const auto v = relative_uv.y;
-
-    const auto approximation = terrain_view.surface_approximation[coordinate.face];
-
-    const auto world_position = approximation.p + approximation.p_u * u + approximation.p_v * v +
-                         approximation.p_uu * u * u + approximation.p_uv * u * v + approximation.p_vv * v * v;
-    const auto world_normal = normalize(cross(approximation.p_v, approximation.p_u)); // normal at viewer coordinate good enough?
-
-    const auto view_distance = distance(world_position + height * world_normal, terrain_view.world_position);
-
-    return WorldCoordinate(world_position, world_normal, view_distance);
-}
-#else
-void compute_world_coordinate_precise(coordinate: Coordinate, height: float) -> WorldCoordinate { return WorldCoordinate(vec3<float>(0.0), vec3<float>(0.0), 0.0); }
-#endif
-
-void compute_tangent_space(world_coordinate: WorldCoordinate) -> TangentSpace {
-    const auto position_dx = dpdx(world_coordinate.position);
-    const auto position_dy = dpdy(world_coordinate.position);
-
-    const auto tangent_x = cross(position_dy, world_coordinate.normal);
-    const auto tangent_y = cross(world_coordinate.normal, position_dx);
-    let scale     = 1.0 / dot(position_dx, tangent_x);
-
-    return TangentSpace(tangent_x, tangent_y, scale);
-}
-
-void apply_height(world_coordinate: WorldCoordinate, height: float) -> vec3<float> {
+float3 apply_height(WorldCoordinate world_coordinate, float height) {
     return world_coordinate.position + height * world_coordinate.normal;
 }
 
-void inverse_mix(a: float, b: float, value: float) -> float {
+float inverse_mix(float a, float b, float value) {
     return saturate((value - a) / (b - a));
 }
 
-void compute_morph(lod: uint, view_distance: float) -> float {
+float compute_morph(uint lod, float view_distance) {
 #ifdef MORPH
-    const auto target_lod = log2(terrain_view.morph_distance / view_distance);
+    float target_lod = log2(terrain_view.morph_distance / view_distance);
 
-    return select(saturate(1.0 - (target_lod - float(lod)) / terrain_view.morph_range), 0.0, lod == 0);
+    return (lod == 0) ? 0.0f : saturate(1.0f - (target_lod - float(lod)) / terrain_view.morph_range);
 #else
-    return 0.0;
+    return 0.0f;
 #endif
 }
 
-void compute_blend(view_distance: float) -> Blend {
-    const auto target_lod = log2(terrain_view.blend_distance / view_distance);
+Blend compute_blend(float view_distance) {
+    float target_lod = log2(terrain_view.blend_distance / view_distance);
 
 #ifdef BLEND
-    const auto ratio = saturate(1.0 - fract(target_lod) / terrain_view.blend_range);
+    float ratio = saturate(1.0f - frac(target_lod) / terrain_view.blend_range);
 #else
-    const auto ratio = 0.0;
+    float ratio = 0.0f;
 #endif
 
-    return Blend(min(uint(target_lod), terrain.lod_count - 1), select(ratio, 0.0, target_lod < 1 || uint(target_lod) >= terrain.lod_count));
+    Blend b = {min((uint)target_lod, terrain.lod_count - 1), (target_lod < 1.0f || (uint)target_lod >= terrain.lod_count) ? 0.0f : ratio};
+    return b;
 }
 
-void compute_view_coordinate(face: uint, lod: uint) -> Coordinate {
-    const auto coordinate = terrain_view.coordinates[face];
+
+Coordinate compute_subdivision_coordinate(TileCoordinate tile) {
+    Coordinate view_coordinate = compute_view_coordinate(tile.face, tile.lod);
+
+    int2 offset = int2(view_coordinate.xy) - int2(tile.xy);
+    float2 uv = view_coordinate.uv;
+
+    if      (offset.x < 0) { uv.x = 0.0f; }
+    else if (offset.x > 0) { uv.x = 1.0f; }
+    if      (offset.y < 0) { uv.y = 0.0f; }
+    else if (offset.y > 0) { uv.y = 1.0f; }
 
 #ifdef FRAGMENT
-    auto view_coordinate = Coordinate(face, terrain_view.lod, coordinate.xy, coordinate.uv, vec2<float>(0.0), vec2<float>(0.0));
+    Coordinate result = {tile.face, tile.lod, tile.xy, uv, float2(0.0f, 0.0f), float2(0.0f, 0.0f)};
 #else
-    auto view_coordinate = Coordinate(face, terrain_view.lod, coordinate.xy, coordinate.uv);
+    Coordinate result = {tile.face, tile.lod, tile.xy, uv};
 #endif
-
-    coordinate_change_lod(&view_coordinate, lod);
-
-    return view_coordinate;
-}
-
-void compute_subdivision_coordinate(tile: TileCoordinate) -> Coordinate {
-    const auto view_coordinate = compute_view_coordinate(tile.face, tile.lod);
-
-    auto offset = vec2<int>(view_coordinate.xy) - vec2<int>(tile.xy);
-    var uv     = view_coordinate.uv;
-
-    if      (offset.x < 0) { uv.x = 0.0; }
-    else if (offset.x > 0) { uv.x = 1.0; }
-    if      (offset.y < 0) { uv.y = 0.0; }
-    else if (offset.y > 0) { uv.y = 1.0; }
-
-#ifdef FRAGMENT
-    return Coordinate(tile.face, tile.lod, tile.xy, uv, vec2<float>(0.0), vec2<float>(0.0));
-#else
-    return Coordinate(tile.face, tile.lod, tile.xy, uv);
-#endif
-}
-
-void coordinate_change_lod(coordinate: ptr<function, Coordinate>, new_lod: uint) {
-    const auto lod_difference = int(new_lod) - int((*coordinate).lod);
-
-    if (lod_difference == 0) { return; }
-
-    const auto scale = exp2(float(lod_difference));
-    const auto xy = (*coordinate).xy;
-    const auto uv = (*coordinate).uv * scale;
-
-    (*coordinate).lod = new_lod;
-    (*coordinate).xy = vec2<uint>(vec2<float>(xy) * scale) + vec2<uint>(uv);
-    (*coordinate).uv = uv % 1.0 + select(vec2<float>(xy % uint(1 / scale)) * scale, vec2<float>(0.0), lod_difference > 0);
-
-#ifdef FRAGMENT
-    (*coordinate).uv_dx *= scale;
-    (*coordinate).uv_dy *= scale;
-#endif
-}
-
-void compute_tile_tree_uv(coordinate: Coordinate) -> vec2<float> {
-    const auto view_coordinate = compute_view_coordinate(coordinate.face, coordinate.lod);
-
-    const auto tile_count = int(exp2(float(coordinate.lod)));
-    let tree_size  = min(int(terrain_view.tree_size), tile_count);
-    let tree_xy    = vec2<int>(view_coordinate.xy) + vec2<int>(round(view_coordinate.uv)) - vec2<int>(terrain_view.tree_size / 2);
-    let view_xy    = clamp(tree_xy, vec2<int>(0), vec2<int>(tile_count - tree_size));
-
-    return (vec2<float>(vec2<int>(coordinate.xy) - view_xy) + coordinate.uv) / float(tree_size);
+    return result;
 }
 
 
-void lookup_tile_tree_entry(coordinate: Coordinate) -> TileTreeEntry {
-    let tree_xy    = vec2<uint>(coordinate.xy) % terrain_view.tree_size;
-    const auto tree_index = ((coordinate.face * terrain.lod_count +
+float2 compute_tile_tree_uv(Coordinate coordinate) {
+    Coordinate view_coordinate = compute_view_coordinate(coordinate.face, coordinate.lod);
+
+    int tile_count = int(exp2(float(coordinate.lod)));
+    int tree_size  = min(int(terrain_view.tree_size), tile_count);
+    int2 tree_xy    = int2(view_coordinate.xy) + int2(round(view_coordinate.uv)) - int2(terrain_view.tree_size / 2, terrain_view.tree_size / 2);
+    int2 view_xy    = clamp(tree_xy, int2(0, 0), int2(tile_count - tree_size, tile_count - tree_size));
+
+    return (float2(int2(coordinate.xy) - view_xy) + coordinate.uv) / float(tree_size);
+}
+
+
+TileTreeEntry lookup_tile_tree_entry(Coordinate coordinate) {
+    uint2 tree_xy    = coordinate.xy % terrain_view.tree_size;
+    uint tree_index = ((coordinate.face * terrain.lod_count +
                        coordinate.lod) * terrain_view.tree_size +
                        tree_xy.x)      * terrain_view.tree_size +
                        tree_xy.y;
@@ -245,42 +263,46 @@ void lookup_tile_tree_entry(coordinate: Coordinate) -> TileTreeEntry {
     return tile_tree[tree_index];
 }
 
-// Todo: implement this more efficiently
-void lookup_best(lookup_coordinate: Coordinate) -> BestLookup {
-    var coordinate: Coordinate; var tile_tree_uv: vec2<float>;
+BestLookup lookup_best(Coordinate lookup_coordinate) {
+    Coordinate coordinate; float2 tile_tree_uv;
 
-    var new_coordinate   = lookup_coordinate;
-    coordinate_change_lod(&new_coordinate , 0u);
-    auto new_tile_tree_uv = new_coordinate.uv;
+    Coordinate new_coordinate   = lookup_coordinate;
+    coordinate_change_lod(new_coordinate , 0u);
+    float2 new_tile_tree_uv = new_coordinate.uv;
 
-    while (new_coordinate.lod < terrain.lod_count && !any(new_tile_tree_uv <= vec2<float>(0.0)) && !any(new_tile_tree_uv >= vec2<float>(1.0))) {
+    while (new_coordinate.lod < terrain.lod_count && !any(new_tile_tree_uv <= float2(0.0f, 0.0f)) && !any(new_tile_tree_uv >= float2(1.0f, 1.0f))) {
         coordinate  = new_coordinate;
         tile_tree_uv = new_tile_tree_uv;
 
         new_coordinate = lookup_coordinate;
-        coordinate_change_lod(&new_coordinate, coordinate.lod + 1u);
+        coordinate_change_lod(new_coordinate, coordinate.lod + 1u);
         new_tile_tree_uv = compute_tile_tree_uv(new_coordinate);
     }
 
-    const auto tile_tree_entry = lookup_tile_tree_entry(coordinate);
+    TileTreeEntry tile_tree_entry = lookup_tile_tree_entry(coordinate);
 
-    coordinate_change_lod(&coordinate, tile_tree_entry.atlas_lod);
+    coordinate_change_lod(coordinate, tile_tree_entry.atlas_lod);
 
-    return BestLookup(AtlasTile(tile_tree_entry.atlas_index, coordinate, 0.0), tile_tree_uv);
+    AtlasTile tile = {tile_tree_entry.atlas_index, coordinate, 0.0f};
+    BestLookup bl = {tile, tile_tree_uv};
+    return bl;
 }
 
-void lookup_tile(lookup_coordinate: Coordinate, blend: Blend) -> AtlasTile {
+AtlasTile lookup_tile(Coordinate lookup_coordinate, Blend blend) {
 #ifdef TILE_TREE_LOD
     return lookup_best(lookup_coordinate).tile;
 #else
-    auto coordinate = lookup_coordinate;
+    Coordinate coordinate = lookup_coordinate;
 
-    coordinate_change_lod(&coordinate, blend.lod);
+    coordinate_change_lod(coordinate, blend.lod);
 
-    const auto tile_tree_entry = lookup_tile_tree_entry(coordinate);
+    TileTreeEntry tile_tree_entry = lookup_tile_tree_entry(coordinate);
 
-    coordinate_change_lod(&coordinate, tile_tree_entry.atlas_lod);
+    coordinate_change_lod(coordinate, tile_tree_entry.atlas_lod);
 
-    return AtlasTile(tile_tree_entry.atlas_index, coordinate, blend.ratio);
+    AtlasTile tile = {tile_tree_entry.atlas_index, coordinate, blend.ratio};
+    return tile;
 #endif
 }
+
+#endif // FUNCTIONS_HLSL
