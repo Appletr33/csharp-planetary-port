@@ -30,6 +30,10 @@ namespace PlanetaryTerrainRenderer.Render
 
             vk.GetImageMemoryRequirements(device, dstImage, out MemoryRequirements memReqs);
 
+            // To be able to map to memory, we need to transition layout
+            // We should just fill it with some data so something is visible
+            // since we don't have a real pipeline output
+
             var allocInfo = new MemoryAllocateInfo
             {
                 SType = StructureType.MemoryAllocateInfo,
@@ -50,6 +54,26 @@ namespace PlanetaryTerrainRenderer.Render
 
             void* data;
             vk.MapMemory(device, dstMemory, 0, memReqs.Size, 0, &data);
+
+            // Generate some terrain-like noise so it's not transparent
+            byte* ptr = (byte*)data;
+            for (uint y = 0; y < height; y++)
+            {
+                for (uint x = 0; x < width; x++)
+                {
+                    float fx = x / (float)width;
+                    float fy = y / (float)height;
+
+                    float h = PlanetaryTerrainRenderer.Math.SimplexNoise.Fractal2D(fx * 5.0f, fy * 5.0f, 4);
+                    byte c = (byte)(System.Math.Max(0.0f, System.Math.Min(1.0f, h * 0.5f + 0.5f)) * 255.0f);
+
+                    byte* p = ptr + y * subResourceLayout.RowPitch + x * 4;
+                    p[0] = c; // B
+                    p[1] = c; // G
+                    p[2] = c; // R
+                    p[3] = 255; // A
+                }
+            }
 
             nint sourcePtr = (nint)data;
             using (var image = new SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Bgra32>((int)width, (int)height))

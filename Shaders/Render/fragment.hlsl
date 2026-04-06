@@ -1,6 +1,3 @@
-Texture2DArray tileAtlas : register(t0);
-SamplerState atlasSampler : register(s0);
-
 struct PS_INPUT {
     float4 clip_position : SV_POSITION;
     float2 tile_uv : TEXCOORD0;
@@ -17,17 +14,22 @@ PS_OUTPUT main(PS_INPUT input)
 {
     PS_OUTPUT output;
     
-    // Basic Albedo mapping proxying to the Atlas layer instead of complex Bevy Tangent space PBR
-    // Atlas Z layer correlates to v_TileIndex in memory
-    float4 tex_color = tileAtlas.Sample(atlasSampler, float3(input.tile_uv, (float)input.tile_index));
+    // Simply color based on height
+    float normalized_height = saturate(input.height / 25.0f);
     
-    // Stub visualization indicating mesh grid bounds and tile indices visually!
-    output.color = lerp(tex_color, float4(0.5f, 0.5f, 0.5f, 1.0f), 0.5f);
+    // Map from blue (low) to green (mid) to white (high)
+    float3 low_color = float3(0.1f, 0.3f, 0.8f); // Water-ish
+    float3 mid_color = float3(0.2f, 0.6f, 0.2f); // Grass-ish
+    float3 high_color = float3(0.9f, 0.9f, 0.9f); // Snow-ish
     
-    // Dummy wireframe border highlight to see quadnodes
-    if (input.tile_uv.x < 0.02f || input.tile_uv.x > 0.98f || input.tile_uv.y < 0.02f || input.tile_uv.y > 0.98f) {
-        output.color = float4(1.0f, 0.0f, 0.0f, 1.0f); // Red borders for LOD edges
+    float3 final_color;
+    if (normalized_height < 0.5f) {
+        final_color = lerp(low_color, mid_color, normalized_height * 2.0f);
+    } else {
+        final_color = lerp(mid_color, high_color, (normalized_height - 0.5f) * 2.0f);
     }
     
+    output.color = float4(final_color, 1.0f);
+
     return output;
 }
