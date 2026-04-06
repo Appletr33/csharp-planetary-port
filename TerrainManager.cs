@@ -52,13 +52,31 @@ namespace PlanetaryTerrainRenderer
                 {
                     for (int x = 0; x < res; x++)
                     {
-                        float fx = (x / (float)res) * 2.0f - 1.0f;
-                        float fz = (y / (float)res) * 2.0f - 1.0f;
-                        float h = PlanetaryTerrainRenderer.Math.SimplexNoise.Fractal2D(fx, fz, 4);
+                        float u = (float)x / (res - 1);
+                        float v = (float)y / (res - 1);
                         
-                        verts[(y * res + x) * 3 + 0] = fx * 100.0f;
-                        verts[(y * res + x) * 3 + 1] = h * 25.0f; // Elevated planetary ridge height
-                        verts[(y * res + x) * 3 + 2] = fz * 100.0f;
+                        // Map 2D grid to 3D sphere coordinates (Mercator-ish)
+                        float theta = u * 2.0f * (float)System.Math.PI;
+                        float phi = (v - 0.5f) * (float)System.Math.PI;
+
+                        float radius = 100.0f; // Base planet radius
+
+                        float dirX = (float)(System.Math.Cos(phi) * System.Math.Cos(theta));
+                        float dirY = (float)System.Math.Sin(phi);
+                        float dirZ = (float)(System.Math.Cos(phi) * System.Math.Sin(theta));
+
+                        // Generate 3D noise based on direction for seamless wrapping
+                        float h = PlanetaryTerrainRenderer.Math.SimplexNoise.Fractal3D(dirX * 2.0f, dirY * 2.0f, dirZ * 2.0f, 6);
+
+                        // Remap noise from [-1, 1] to [0, 1], then scale
+                        float elevation = (h * 0.5f + 0.5f) * 15.0f; // 15 units high mountains
+
+                        // Flatten "oceans"
+                        if (elevation < 7.0f) elevation = 7.0f;
+
+                        verts[(y * res + x) * 3 + 0] = dirX * (radius + elevation);
+                        verts[(y * res + x) * 3 + 1] = dirY * (radius + elevation);
+                        verts[(y * res + x) * 3 + 2] = dirZ * (radius + elevation);
                     }
                 }
                 
