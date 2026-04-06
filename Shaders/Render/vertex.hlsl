@@ -1,10 +1,12 @@
-[[vk::push_constant]]
-cbuffer PushConstants {
-    float4x4 viewProj;
-};
+#define VERTEX
+
+#include "../types.hlsl"
+#include "../bindings.hlsl"
+#include "../functions.hlsl"
+#include "../attachments.hlsl"
 
 struct VS_INPUT {
-    [[vk::location(0)]] float3 position : POSITION;
+    uint vertex_index : SV_VertexID;
 };
 
 struct VS_OUTPUT {
@@ -15,19 +17,39 @@ struct VS_OUTPUT {
     [[vk::location(3)]] float height : TEXCOORD3;
 };
 
+struct VertexInfo {
+    uint tile_index;
+    Coordinate coordinate;
+    WorldCoordinate world_coordinate;
+    Blend blend;
+};
+
+VertexInfo vertex_info(VS_INPUT input) {
+    VertexInfo info;
+    info.tile_index       = input.vertex_index / terrain_view.vertices_per_tile;
+    info.coordinate       = compute_coordinate(input.vertex_index);
+    info.world_coordinate = compute_world_coordinate(info.coordinate, info.tile_index, info.coordinate.uv);
+    info.blend            = compute_blend(info.world_coordinate.view_distance);
+    return info;
+}
+
+VS_OUTPUT vertex_output(inout VertexInfo info, float height) {
+    VS_OUTPUT output;
+    float3 world_pos = apply_height(info.world_coordinate, height);
+    output.clip_position = mul(view.viewProj, float4(world_pos, 1.0f));
+    output.tile_uv       = info.coordinate.uv;
+    output.tile_index    = info.tile_index;
+    output.view_distance = info.world_coordinate.view_distance;
+    output.height        = height;
+    return output;
+}
+
 VS_OUTPUT main(VS_INPUT input)
 {
-    VS_OUTPUT output;
-    
-    float3 world_pos = input.position;
-    
-    output.clip_position = mul(viewProj, float4(world_pos, 1.0f));
-    
-    // Just map world XZ to UV for now
-    output.tile_uv = world_pos.xz * 0.01f;
-    output.tile_index = 0;
-    output.view_distance = 0;
-    output.height = length(world_pos) - 100.0f;
-    
-    return output;
+    VertexInfo info   = vertex_info(input);
+
+    AtlasTile tile   = lookup_tile(info.coordinate, info.blend);
+    float height = sample_height(tile);
+
+    return vertex_output(info, height);
 }

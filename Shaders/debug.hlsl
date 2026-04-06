@@ -1,128 +1,129 @@
-/* Translated from WGSL */
-#define_import_path bevy_terrain::debug
+#ifndef DEBUG_HLSL
+#define DEBUG_HLSL
 
-#import bevy_terrain::types::{Coordinate, WorldCoordinate, TileCoordinate, AtlasTile, Blend}
-#import bevy_terrain::bindings::{terrain, tile_tree, terrain_view, approximate_height, geometry_tiles, attachments, origins}
-#import bevy_terrain::functions::{lookup_best, compute_world_coordinate, tree_lod, compute_subdivision_coordinate}
-#import bevy_pbr::mesh_view_bindings::view
+#include "types.hlsl"
+#include "bindings.hlsl"
+#include "functions.hlsl"
 
-void index_color(index: uint) -> vec4<float> {
-    auto COLOR_ARRAY = array(
-        vec4(1.0, 0.0, 0.0, 1.0),
-        vec4(0.0, 1.0, 0.0, 1.0),
-        vec4(0.0, 0.0, 1.0, 1.0),
-        vec4(1.0, 1.0, 0.0, 1.0),
-        vec4(1.0, 0.0, 1.0, 1.0),
-        vec4(0.0, 1.0, 1.0, 1.0),
-    );
+float4 index_color(uint index) {
+    float4 COLOR_ARRAY[6] = {
+        float4(1.0f, 0.0f, 0.0f, 1.0f),
+        float4(0.0f, 1.0f, 0.0f, 1.0f),
+        float4(0.0f, 0.0f, 1.0f, 1.0f),
+        float4(1.0f, 1.0f, 0.0f, 1.0f),
+        float4(1.0f, 0.0f, 1.0f, 1.0f),
+        float4(0.0f, 1.0f, 1.0f, 1.0f)
+    };
 
-    return mix(COLOR_ARRAY[index % 6u], vec4<float>(0.6), 0.2);
+    return lerp(COLOR_ARRAY[index % 6u], float4(0.6f, 0.6f, 0.6f, 1.0f), 0.2f);
 }
 
-void tile_tree_outlines(uv: vec2<float>) -> float {
-    const auto thickness = 0.015;
-    const auto inside = step(vec2<float>(thickness), uv) * step(uv, vec2<float>(1.0 - thickness));
+float tile_tree_outlines(float2 uv) {
+    float thickness = 0.015f;
+    float2 inside = step(float2(thickness, thickness), uv) * step(uv, float2(1.0f - thickness, 1.0f - thickness));
 
-    return 1.0 - inside.x * inside.y;
+    return 1.0f - inside.x * inside.y;
 }
 
-void checker_color(coordinate: Coordinate, ratio: float) -> vec4<float> {
-    var color        = index_color(coordinate.lod);
-    auto parent_color = index_color(coordinate.lod - 1);
-    color            = select(color,        mix(color,        vec4(0.0), 0.5), (coordinate.xy.x + coordinate.xy.y) % 2u == 0u);
-    parent_color     = select(parent_color, mix(parent_color, vec4(0.0), 0.5), ((coordinate.xy.x >> 1) + (coordinate.xy.y >> 1)) % 2u == 0u);
+float4 checker_color(Coordinate coordinate, float ratio) {
+    float4 color        = index_color(coordinate.lod);
+    float4 parent_color = index_color(coordinate.lod - 1);
+    color            = ((coordinate.xy.x + coordinate.xy.y) % 2u == 0u) ? lerp(color, float4(0.0f, 0.0f, 0.0f, 0.0f), 0.5f) : color;
+    parent_color     = (((coordinate.xy.x >> 1) + (coordinate.xy.y >> 1)) % 2u == 0u) ? lerp(parent_color, float4(0.0f, 0.0f, 0.0f, 0.0f), 0.5f) : parent_color;
 
-    return mix(color, parent_color, ratio);
+    return lerp(color, parent_color, ratio);
 }
 
-void show_data_lod(blend: Blend, tile: AtlasTile) -> vec4<float> {
+float4 show_data_lod(Blend blend, AtlasTile tile) {
 #ifdef TILE_TREE_LOD
-    const auto ratio = 0.0;
+    float ratio = 0.0f;
 #else
-    const auto ratio = select(0.0, blend.ratio, blend.lod == tile.coordinate.lod);
+    float ratio = (blend.lod == tile.coordinate.lod) ? blend.ratio : 0.0f;
 #endif
 
-    auto color = checker_color(tile.coordinate, ratio);
+    float4 color = checker_color(tile.coordinate, ratio);
 
-    if (ratio > 0.95 && blend.lod == tile.coordinate.lod) {
-        color = mix(color, vec4<float>(0.0), 0.8);
+    if (ratio > 0.95f && blend.lod == tile.coordinate.lod) {
+        color = lerp(color, float4(0.0f, 0.0f, 0.0f, 1.0f), 0.8f);
     }
 
 // #ifdef SPHERICAL
-//     color = mix(color, index_color(tile.coordinate.face), 0.3);
+//     color = lerp(color, index_color(tile.coordinate.face), 0.3f);
 // #endif
 
     return color;
 }
 
-void show_geometry_lod(coordinate: Coordinate, tile_index: uint) -> vec4<float> {
-    let tile_uv       = coordinate.uv;
-    let tile          = geometry_tiles[tile_index];
-    const auto view_distance = mix(mix(tile.view_distances.x, tile.view_distances.y, tile_uv.x),
-                            mix(tile.view_distances.z, tile.view_distances.w, tile_uv.x), tile_uv.y);
+float4 show_geometry_lod(Coordinate coordinate, uint tile_index) {
+    float2 tile_uv       = coordinate.uv;
+    GeometryTile tile          = geometry_tiles[tile_index];
+    float view_distance = lerp(lerp(tile.view_distances.x, tile.view_distances.y, tile_uv.x),
+                            lerp(tile.view_distances.z, tile.view_distances.w, tile_uv.x), tile_uv.y);
 
-    const auto target_lod = log2(terrain_view.morph_distance / view_distance);
-    let lod        = uint(coordinate.lod);
+    float target_lod = log2(terrain_view.morph_distance / view_distance);
+    uint lod        = coordinate.lod;
 
 #ifdef MORPH
-    const auto ratio = select(saturate(1.0 - (target_lod - float(lod)) / terrain_view.morph_range), 0.0, lod == 0);
+    float ratio = (lod == 0) ? 0.0f : saturate(1.0f - (target_lod - float(lod)) / terrain_view.morph_range);
 #else
-    const auto ratio = 0.0;
+    float ratio = 0.0f;
 #endif
 
-    auto color = checker_color(coordinate, ratio);
+    float4 color = checker_color(coordinate, ratio);
 
-    const auto tile_coordinate = TileCoordinate(tile.face, tile.lod, tile.xy);
+    TileCoordinate tile_coordinate = {tile.face, tile.lod, tile.xy};
 
-    if (distance(coordinate.uv, compute_subdivision_coordinate(tile_coordinate).uv) < 0.1) {
-        color = mix(index_color(coordinate.lod + 1), vec4(0.0), 0.7);
+    if (distance(coordinate.uv, compute_subdivision_coordinate(tile_coordinate).uv) < 0.1f) {
+        color = lerp(index_color(coordinate.lod + 1), float4(0.0f, 0.0f, 0.0f, 1.0f), 0.7f);
     }
 
-    if (fract(target_lod) < 0.01 && target_lod >= 1.0) {
-        color = mix(color, vec4<float>(0.0), 0.8);
+    if (frac(target_lod) < 0.01f && target_lod >= 1.0f) {
+        color = lerp(color, float4(0.0f, 0.0f, 0.0f, 1.0f), 0.8f);
     }
 
 #ifdef SPHERICAL
-    color = mix(color, index_color(coordinate.face), 0.3);
+    color = lerp(color, index_color(coordinate.face), 0.3f);
 #endif
 
-    if (max(0.0, target_lod) < float(coordinate.lod) - 1.0 + terrain_view.morph_range) {
+    if (max(0.0f, target_lod) < float(coordinate.lod) - 1.0f + terrain_view.morph_range) {
         // The view_distance and morph range are not sufficient.
         // The same tile overlapps two morph zones.
         // -> increase morph distance
-        color = vec4<float>(1.0, 0.0, 0.0, 1.0);
+        color = float4(1.0f, 0.0f, 0.0f, 1.0f);
     }
     if (floor(target_lod) > float(coordinate.lod)) {
         // The view_distance and morph range are not sufficient.
         // The tile does have an insuffient LOD.
         // -> increase morph tolerance
-        color = vec4<float>(0.0, 1.0, 0.0, 1.0);
+        color = float4(0.0f, 1.0f, 0.0f, 1.0f);
     }
 
     return color;
 }
 
-void show_tile_tree(coordinate: Coordinate, world_coordinate: WorldCoordinate) -> vec4<float> {
-    let target_lod     = log2(terrain_view.load_distance / world_coordinate.view_distance);
+float4 show_tile_tree(Coordinate coordinate, WorldCoordinate world_coordinate) {
+    float target_lod     = log2(terrain_view.load_distance / world_coordinate.view_distance);
 
-    const auto best_lookup = lookup_best(coordinate);
+    BestLookup best_lookup = lookup_best(coordinate);
 
-    auto color = checker_color(best_lookup.tile.coordinate, 0.0);
-    color     = mix(color, vec4<float>(0.1), tile_tree_outlines(best_lookup.tile_tree_uv));
+    float4 color = checker_color(best_lookup.tile.coordinate, 0.0f);
+    color     = lerp(color, float4(0.1f, 0.1f, 0.1f, 1.0f), tile_tree_outlines(best_lookup.tile_tree_uv));
 
-    if (fract(target_lod) < 0.01 && target_lod >= 1.0) {
-        color = mix(index_color(uint(target_lod)), vec4<float>(0.0), 0.8);
+    if (frac(target_lod) < 0.01f && target_lod >= 1.0f) {
+        color = lerp(index_color(uint(target_lod)), float4(0.0f, 0.0f, 0.0f, 1.0f), 0.8f);
     }
 
     return color;
 }
 
-void show_pixels(tile: AtlasTile) -> vec4<float> {
-    const auto pixel_size = 1.0;
-    const auto pixel_coordinate = tile.coordinate.uv * float(attachments.height.center_size) / pixel_size;
+float4 show_pixels(AtlasTile tile) {
+    float pixel_size = 1.0f;
+    float2 pixel_coordinate = tile.coordinate.uv * float(attachments.height.center_size) / pixel_size;
 
-    const auto is_even = (uint(pixel_coordinate.x) + uint(pixel_coordinate.y)) % 2u == 0u;
+    bool is_even = (uint(pixel_coordinate.x) + uint(pixel_coordinate.y)) % 2u == 0u;
 
-    if (is_even) { return vec4<float>(0.5, 0.5, 0.5, 1.0); }
-    else {         return vec4<float>(0.1, 0.1, 0.1, 1.0); }
+    if (is_even) { return float4(0.5f, 0.5f, 0.5f, 1.0f); }
+    else {         return float4(0.1f, 0.1f, 0.1f, 1.0f); }
 }
+
+#endif // DEBUG_HLSL

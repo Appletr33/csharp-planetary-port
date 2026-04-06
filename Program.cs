@@ -331,8 +331,8 @@ namespace PlanetaryTerrainRenderer
 
         private static void CreateGraphicsPipeline()
         {
-            var vertShaderCode = shaderCompiler.CompileHLSL(File.ReadAllText("Shaders/Render/vertex.hlsl"), "vertex.hlsl", ShaderKind.VertexShader);
-            var fragShaderCode = shaderCompiler.CompileHLSL(File.ReadAllText("Shaders/Render/fragment.hlsl"), "fragment.hlsl", ShaderKind.FragmentShader);
+            var vertShaderCode = shaderCompiler.CompileHLSL(File.ReadAllText("Shaders/Render/vertex_preprocessed.hlsl"), "vertex.hlsl", ShaderKind.VertexShader);
+            var fragShaderCode = shaderCompiler.CompileHLSL(File.ReadAllText("Shaders/Render/fragment_preprocessed.hlsl"), "fragment.hlsl", ShaderKind.FragmentShader);
 
             var vertModule = CreateShaderModule(vertShaderCode);
             var fragModule = CreateShaderModule(fragShaderCode);
